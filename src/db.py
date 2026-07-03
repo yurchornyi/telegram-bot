@@ -105,6 +105,16 @@ class Database:
                 is_active INTEGER NOT NULL DEFAULT 1
             )
         ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS failed_chat_joins (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT,
+                username TEXT,
+                link TEXT,
+                error TEXT,
+                failed_at TEXT NOT NULL
+            )
+        ''')
         await self._ensure_column('monitored_chats', 'folder_name', 'TEXT')
         await db.execute('''
             CREATE TABLE IF NOT EXISTS user_memory (
@@ -146,6 +156,7 @@ class Database:
         await db.execute('CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_monitored_chats_active ON monitored_chats(is_active)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_job_alerts_created_at ON job_alerts(created_at)')
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_failed_chat_joins_failed_at ON failed_chat_joins(failed_at)')
         await db.commit()
         logger.info("БД ініціалізована: %s", self.path)
 
@@ -601,6 +612,52 @@ class Database:
             (chat_id,),
         )
         return await cur.fetchone() is not None
+
+    async def mark_chat_join_failed(
+        self,
+        chat_id: int,
+        title: str | None = None,
+        username: str | None = None,
+        link: str | None = None,
+        error: str | None = None,
+    ):
+        db = await self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            '''
+            INSERT INTO failed_chat_joins (chat_id, title, username, link, error, failed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                title = excluded.title,
+                username = excluded.username,
+                link = excluded.link,
+                error = excluded.error,
+                failed_at = excluded.failed_at
+            ''',
+            (chat_id, title, username, link, error, now),
+        )
+        await db.execute(
+            "UPDATE monitored_chats SET is_active = 0 WHERE chat_id = ?",
+            (chat_id,),
+        )
+        await db.commit()
+
+    async def is_failed_chat_join(self, chat_id: int) -> bool:
+        db = await self._get_conn()
+        cur = await db.execute(
+            "SELECT 1 FROM failed_chat_joins WHERE chat_id = ?",
+            (chat_id,),
+        )
+        return await cur.fetchone() is not None
+
+    async def get_failed_chat_join(self, chat_id: int) -> dict | None:
+        db = await self._get_conn()
+        cur = await db.execute(
+            "SELECT * FROM failed_chat_joins WHERE chat_id = ?",
+            (chat_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
 
     async def delete_older_than(self, days: int) -> int:
         """

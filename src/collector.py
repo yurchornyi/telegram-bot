@@ -333,6 +333,8 @@ class TelegramCollector:
                 chat_id = int(getattr(chat, 'id'))
                 if chat_type == 'private' or chat_id in seen:
                     continue
+                if await self.db.is_failed_chat_join(chat_id):
+                    continue
                 seen.add(chat_id)
 
                 last_activity_at, recent_count = await self._chat_activity(chat, messages_limit=messages_limit)
@@ -502,22 +504,35 @@ class TelegramCollector:
         entity = self._search_cache.get(str(key))
         if entity is None:
             raise ValueError("Результат пошуку вже не в кеші. Запусти пошук ще раз.")
-        return await self._join_and_monitor_entity(entity)
+        try:
+            return await self._join_and_monitor_entity(entity)
+        except Exception as exc:
+            await self._mark_join_failed(entity, exc)
+            raise
 
     async def join_and_monitor_all_search_results(self, delay_seconds: float = 8.0, max_chats: int = 20) -> list[dict]:
         results = []
         active_before = await self.db.get_monitored_chats()
-        entities = list(self._search_cache.values())[:max_chats]
+        entities = []
+        for entity in self._search_cache.values():
+            chat_id = int(getattr(entity, 'id'))
+            if await self.db.is_failed_chat_join(chat_id):
+                continue
+            entities.append(entity)
+            if len(entities) >= max_chats:
+                break
         for index, entity in enumerate(entities, start=1):
             try:
                 data = await self._join_and_monitor_entity(entity)
                 results.append({"ok": True, "title": data["title"], "link": data.get("link"), "is_new": data.get("is_new", False)})
             except FloodWaitError as exc:
                 logger.warning("FloodWait під час batch join: %s сек", exc.seconds)
+                await self._mark_join_failed(entity, exc)
                 results.append({"ok": False, "title": _entity_title(entity), "error": f"FloodWait {exc.seconds} сек"})
                 break
             except Exception as exc:
                 logger.warning("Batch join не вдався для '%s': %s", _entity_title(entity), exc)
+                await self._mark_join_failed(entity, exc)
                 results.append({"ok": False, "title": _entity_title(entity), "error": str(exc)})
             if index < len(entities):
                 await asyncio.sleep(delay_seconds)
@@ -561,6 +576,19 @@ class TelegramCollector:
         data['is_new'] = is_new
         logger.info("%s: %s", "Новий чат додано" if is_new else "Чат вже існує, пропущено", data['title'])
         return data
+
+    async def _mark_join_failed(self, entity, exc: Exception):
+        chat_id = int(getattr(entity, 'id'))
+        username = getattr(entity, 'username', None)
+        link = f"https://t.me/{username}" if username else None
+        await self.db.mark_chat_join_failed(
+            chat_id=chat_id,
+            title=_entity_title(entity),
+            username=username,
+            link=link,
+            error=str(exc),
+        )
+        self._search_cache.pop(str(chat_id), None)
 
     async def _organize_joined_chat(self, entity, input_peer):
         title = _entity_title(entity)

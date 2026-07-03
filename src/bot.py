@@ -665,7 +665,14 @@ class DigestBot:
                 chat = await self.collector.join_and_monitor_search_result(key)
             except Exception as exc:
                 logger.error("join_chat: помилка: %s", exc)
-                await query.message.reply_text(f'⚠️ Не вдалось підписатися: {exc}', reply_markup=self.keyboard)
+                failed = await self.db.get_failed_chat_join(int(key)) if str(key).lstrip("-").isdigit() else None
+                manual_link = (failed or {}).get("link") or "посилання недоступне"
+                await query.message.reply_text(
+                    '⚠️ Не вдалось підписатися автоматично.\n'
+                    'Я більше не буду показувати цей чат у пошуку і не буду пробувати знову.\n'
+                    f'Якщо він потрібен — відкрий вручну: {manual_link}',
+                    reply_markup=self.keyboard,
+                )
                 return
             await query.message.reply_text(
                 f'✅ Підписався і додав у моніторинг:\n'
@@ -1185,6 +1192,8 @@ class DigestBot:
 
         fresh = []
         for chat in chats:
+            if await self.db.is_failed_chat_join(chat["chat_id"]):
+                continue
             if not await self.db.is_monitored_chat(chat["chat_id"]):
                 fresh.append(chat)
             if len(fresh) >= remaining:
@@ -1238,6 +1247,13 @@ class DigestBot:
                 added.append(data)
                 await asyncio.sleep(60)
             except Exception as exc:
+                await self.db.mark_chat_join_failed(
+                    chat_id=chat["chat_id"],
+                    title=chat.get("title"),
+                    username=chat.get("username"),
+                    link=chat.get("link"),
+                    error=str(exc),
+                )
                 failed.append((chat, str(exc)))
                 logger.warning("auto join не вдався для '%s': %s", chat.get("title"), exc)
 
@@ -1250,7 +1266,8 @@ class DigestBot:
         if failed:
             lines.append(f'\n⚠️ Не вдалось: {len(failed)}')
             for chat, error in failed[:5]:
-                lines.append(f'• {chat.get("title")}: {error}')
+                manual = chat.get("link") or "посилання недоступне"
+                lines.append(f'• {chat.get("title")}: пропускаю надалі. Вручну: {manual}')
         await self.send_long("\n".join(lines), reply_markup=self.auto_search_keyboard)
 
     async def jobs_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

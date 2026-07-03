@@ -28,7 +28,7 @@ from telegram.ext import (
 )
 
 from .db import Database
-from .ai import AIService, split_for_telegram, contains_important_report
+from .ai import AIService, split_for_telegram
 
 logger = logging.getLogger("bot")
 if not logger.handlers:
@@ -73,8 +73,8 @@ class DigestBot:
         return [
             BotCommand('start', 'Відкрити меню'),
             BotCommand('menu', 'Показати нижнє меню'),
+            BotCommand('m', 'Показати меню'),
             BotCommand('summary', 'Звіт по нових повідомленнях'),
-            BotCommand('important', 'Тільки 5/5 і 4/5'),
             BotCommand('ask', 'Питання по базі'),
             BotCommand('search', 'Пошук по базі: /search Таїланд'),
             BotCommand('add_chat', 'Додати чат: /add_chat @chatname'),
@@ -89,8 +89,7 @@ class DigestBot:
             [
                 [KeyboardButton('📊 Звіт'), KeyboardButton('💬 Спитати')],
                 [KeyboardButton('📜 Історія'), KeyboardButton('🔍 Пошук чатів')],
-                [KeyboardButton('⭐ Важливе'), KeyboardButton('💼 Вакансії')],
-                [KeyboardButton('⚙️ Налаштування')],
+                [KeyboardButton('💼 Вакансії'), KeyboardButton('⚙️ Налаштування')],
             ],
             resize_keyboard=True,
             one_time_keyboard=False,
@@ -194,8 +193,8 @@ class DigestBot:
     def _register(self):
         self.app.add_handler(CommandHandler('start', self.start))
         self.app.add_handler(CommandHandler('menu', self.start))
+        self.app.add_handler(CommandHandler('m', self.start))
         self.app.add_handler(CommandHandler('summary', self.summary))
-        self.app.add_handler(CommandHandler('important', self.important))
         self.app.add_handler(CommandHandler('ask', self.ask_command))
         self.app.add_handler(CommandHandler('memory', self.memory_menu))
         self.app.add_handler(CommandHandler('search', self.search_db))
@@ -370,7 +369,6 @@ class DigestBot:
             '💬 спитати', 'спитати',
             '📜 історія', 'історія',
             '🔍 пошук чатів', 'пошук чатів',
-            '⭐ важливе', 'важливе',
             '💼 вакансії', 'вакансії', 'вакансии',
             '⚙️ налаштування', 'налаштування',
         }
@@ -389,8 +387,6 @@ class DigestBot:
         elif text in ['🔍 пошук чатів', 'пошук чатів']:
             context.user_data["mode"] = self.MODE_CHAT_SEARCH
             await self.show_chat_search_presets(update)
-        elif text in ['⭐ важливе', 'важливе']:
-            await self.important(update, context)
         elif text in ['💼 вакансії', 'вакансії', 'вакансии']:
             await self.jobs_menu(update, context)
         elif text in ['⚙️ налаштування', 'налаштування']:
@@ -453,7 +449,7 @@ class DigestBot:
                 return
             if text in [
                 '📊 звіт', 'звіт', '💬 спитати', 'спитати', '📜 історія', 'історія',
-                '⭐ важливе', 'важливе', '💼 вакансії', 'вакансії', 'вакансии',
+                '💼 вакансії', 'вакансії', 'вакансии',
                 '⚙️ налаштування', 'налаштування',
             ]:
                 context.user_data.pop("mode", None)
@@ -1050,7 +1046,7 @@ class DigestBot:
         ]
         await update.message.reply_text(
             f'🔇 Пауза планових звітів\n\n{status}\n\n'
-            'Обери термін. Ручні 📊 Звіт і ⭐ Важливе працюють завжди.',
+            'Обери термін. Ручний 📊 Звіт працює завжди.',
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1524,14 +1520,14 @@ class DigestBot:
                 return
 
             report = await self.ai.summarize(messages)
-            await self.db.save_report(report)
+            report_id = await self.db.save_report(report)
             await self.db.set_last_report_time()
-            logger.info("manual summary: %s повідомлень", len(messages))
+            logger.info("manual summary: %s повідомлень, report_id=%s", len(messages), report_id)
         except Exception as exc:
             logger.error("summary: помилка: %s", exc)
             await update.message.reply_text(self._friendly_error(exc), reply_markup=self.keyboard)
             return
-        await self.send_long(report)
+        await self.send_long(report, reply_markup=self.keyboard)
 
     async def important(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._guard(update):
@@ -1547,7 +1543,7 @@ class DigestBot:
             logger.error("important: помилка: %s", exc)
             await update.message.reply_text(self._friendly_error(exc), reply_markup=self.keyboard)
             return
-        await self.send_long(report)
+        await self.send_long(report, reply_markup=self.keyboard)
 
     async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._guard(update):
@@ -1750,11 +1746,13 @@ class DigestBot:
         await update.message.reply_text("\n".join(lines), reply_markup=self.settings_keyboard)
 
     async def send_alert(self, text: str):
-        await self.send_long(text)
+        await self.send_long(text, reply_markup=self.keyboard)
 
     async def send_long(self, text: str, reply_markup=None):
-        markup = self.hide_keyboard if reply_markup is None else reply_markup
-        for part in split_for_telegram(text):
+        parts = split_for_telegram(text)
+        for index, part in enumerate(parts):
+            is_last = index == len(parts) - 1
+            markup = (reply_markup if reply_markup is not None else self.keyboard) if is_last else self.hide_keyboard
             await self.app.bot.send_message(chat_id=self.owner_chat_id, text=part, reply_markup=markup)
 
     def _format_dt(self, value: str) -> str:

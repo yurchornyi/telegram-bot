@@ -180,7 +180,7 @@ def load_config() -> Config:
         groq_api_key=_optional('GROQ_API_KEY'),
         groq_models=_collect_groq_models(),
         timezone=_validate_timezone(os.getenv('TIMEZONE', 'Europe/Kyiv').strip()),
-        summary_times=_parse_summary_times(os.getenv('SUMMARY_TIMES', '12:00,21:00')),
+        summary_times=_parse_summary_times(os.getenv('SUMMARY_TIMES', '09:00,21:00')),
         fetch_interval_seconds=_optional_int('FETCH_INTERVAL_SECONDS', '300'),
         max_messages_per_chat_on_start=_optional_int('MAX_MESSAGES_PER_CHAT_ON_START', '200'),
         max_input_chars=_optional_int('MAX_INPUT_CHARS', '55000'),

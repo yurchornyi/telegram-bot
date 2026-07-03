@@ -12,6 +12,7 @@ from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import User, Chat, Channel
 
+from .ai import is_job_post, is_moderation_message, job_profile_allows_message
 from .db import Database
 
 logger = logging.getLogger("collector")
@@ -132,7 +133,6 @@ class TelegramCollector:
             if msg:
                 added = await self.db.add_message(msg)
                 if added:
-                    await self._maybe_send_quick_alert(msg)
                     await self._maybe_send_job_alert(msg)
         except FloodWaitError as e:
             logger.warning("⏱️ FloodWait на новому повідомленні, чекаю %s сек", e.seconds)
@@ -155,6 +155,11 @@ class TelegramCollector:
         return False
 
     def _looks_potentially_important(self, text: str) -> bool:
+        if is_moderation_message(text):
+            return False
+        if is_job_post(text):
+            return False
+
         lowered = text.lower()
         has_keyword = any(keyword in lowered for keyword in self.ALERT_KEYWORDS)
         has_number = any(ch.isdigit() for ch in lowered) or any(marker in lowered for marker in self.ALERT_NUMERIC_MARKERS)
@@ -185,11 +190,15 @@ class TelegramCollector:
             return
         if not self._looks_like_job(msg.get('text') or ''):
             return
+        profile = ""
         try:
             if not await self.db.is_job_monitor_active():
                 return
             profile = await self.db.get_job_profile()
             if not profile.strip():
+                return
+            if not job_profile_allows_message(profile, msg.get('text') or ''):
+                logger.info("job_alert: вакансію відсічено по вертикалі профілю до AI")
                 return
             alert = await self.ai.quick_job_alert(profile, msg)
             if alert:
@@ -197,6 +206,17 @@ class TelegramCollector:
                 await self.alert_callback(alert)
         except Exception as exc:
             logger.error("❌ job_alert помилка: %s", exc)
+            if profile.strip() and job_profile_allows_message(profile, msg.get('text') or ''):
+                text = (msg.get('text') or '').strip()
+                fallback = (
+                    "💼 Можлива вакансія під твої критерії\n\n"
+                    "AI зараз не зміг нормально оцінити через ліміт/помилку, але повідомлення схоже на вакансію.\n\n"
+                    f"Чат: {msg.get('chat_title') or 'невідомо'}\n"
+                    f"Посилання: {msg.get('message_link') or 'недоступне'}\n\n"
+                    f"{text[:900]}"
+                )
+                await self.db.save_job_alert(fallback, msg)
+                await self.alert_callback(fallback)
 
     async def _convert_message(self, message) -> dict | None:
         text = (message.message or '').strip()

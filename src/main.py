@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import load_config
 from .db import Database
-from .ai import AIService, contains_important_report
+from .ai import AIService
 from .collector import TelegramCollector
 from .bot import DigestBot
 
@@ -94,14 +94,10 @@ async def main():
                 return
             
             report = await ai.summarize(messages)
-            await db.save_report(report)
+            report_id = await db.save_report(report)
             await db.set_last_report_time()
-
-            if contains_important_report(report):
-                await bot.send_long(report)
-                logger.info("📊 Звіт відправлено. Нових повідомлень: %d", len(messages))
-            else:
-                logger.info("ℹ️ Звіт не відправлено: немає 5/5 або 4/5. Повідомлень: %d", len(messages))
+            await bot.send_long(report)
+            logger.info("📊 Автозвіт відправлено. Повідомлень: %d, report_id=%s", len(messages), report_id)
             
         except Exception as e:
             logger.error("❌ Помилка звіту: %s", e)

@@ -70,6 +70,8 @@ SUMMARY_SYSTEM = """Ти робиш короткий практичний дай
 - вакансії/hiring/job/media buyer/team lead/bizdev;
 - рекламу сервісів, баз, курсів, кол-центрів, VoIP;
 - загальні новини без конкретної дії;
+- побутові продажі/покупки, будматеріали, гараж, нерухомість, особисті оголошення;
+- повідомлення про підписку на канал, правила доступу, капчу, обмеження участі в чаті;
 - флуд, питання без відповіді, "дякую", "хто знає", меми;
 - службові повідомлення модерації чату.
 
@@ -626,6 +628,34 @@ IMPORTANT_INCLUDE_MARKERS = {
 }
 
 
+REPORT_EXCLUDE_MARKERS = {
+    "матеріал", "материал", "стройк", "строител", "гараж", "викуп", "выкуп",
+    "продам", "куплю", "ціна за", "цена за",
+    "участь у чаті обмежена", "участие в чате ограничено", "підписк", "подписк",
+    "для подальшої участі", "для дальнейшего участия", "captcha", "капча",
+    "rules", "правила чату", "правила группы", "натисніть кнопку", "нажмите кнопку",
+    "welcome", "добро пожаловать",
+}
+
+REPORT_INCLUDE_MARKERS = IMPORTANT_INCLUDE_MARKERS | {
+    "affiliate", "арбітраж", "арбитраж", "media buying", "медіабаїнг", "медиабаинг",
+    "traffic", "трафік", "трафик", "nutra", "нутра", "gambling", "гембл",
+    "betting", "беттинг", "dating", "дейтинг", "crypto", "крипт",
+    "facebook ads", "google ads", "tiktok ads", "meta ads", "ads", "реклама",
+    "buyer", "фарм", "фарминг", "фармінг", "аккаунт", "акаунт", "креатив",
+    "creative", "spy", "спай", "прокси", "антик", "bm", "бм",
+}
+
+
+def is_report_candidate(text: str) -> bool:
+    lowered = (text or "").casefold()
+    if not lowered:
+        return False
+    if any(marker in lowered for marker in REPORT_EXCLUDE_MARKERS):
+        return False
+    return any(marker.casefold() in lowered for marker in REPORT_INCLUDE_MARKERS)
+
+
 def filter_important_candidate_messages(messages: list[dict]) -> list[dict]:
     filtered = []
     for msg in messages:
@@ -650,6 +680,8 @@ def filter_general_report_messages(messages: list[dict]) -> list[dict]:
         if is_moderation_message(text):
             continue
         if is_job_post(text):
+            continue
+        if not is_report_candidate(text):
             continue
         filtered.append(msg)
     return filtered

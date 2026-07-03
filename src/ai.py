@@ -432,6 +432,13 @@ def format_messages(messages: list[dict]) -> str:
 SOURCE_LINE_RE = re.compile(r"^(?P<label>\s*(?:Джерело|Посилання)\s*:\s*)(?P<value>.*)$", re.IGNORECASE)
 INLINE_SOURCE_RE = re.compile(r"(?P<label>\b(?:Джерело|Посилання)\s*:\s*)(?P<value>.*)$", re.IGNORECASE)
 TELEGRAM_URL_RE = re.compile(r"https?://(?:t\.me|telegram\.me|telegram\.dog)/[^\s)>\]]+", re.IGNORECASE)
+WORD_RE = re.compile(r"[a-zа-яіїєґ0-9]{3,}", re.IGNORECASE)
+
+SOURCE_STOPWORDS = {
+    "що", "чому", "важливо", "джерело", "без", "посилання", "звіт", "робити",
+    "для", "про", "это", "это", "как", "the", "and", "with", "буде", "може",
+    "может", "вплинути", "работы", "роботи", "інструмент", "инструмент",
+}
 
 
 def clean_report_links(text: str) -> str:
@@ -458,6 +465,70 @@ def clean_report_links(text: str) -> str:
         else:
             cleaned_lines.append(f"{match.group('label')}без посилання")
     return "\n".join(cleaned_lines)
+
+
+def _source_tokens(text: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in WORD_RE.findall(text or "")
+        if token.casefold() not in SOURCE_STOPWORDS
+    }
+
+
+def fill_missing_report_sources(report: str, messages: list[dict]) -> str:
+    source_items = []
+    for msg in messages:
+        link = msg.get("message_link")
+        if not link:
+            continue
+        tokens = _source_tokens(msg.get("text") or "")
+        if tokens:
+            source_items.append((tokens, link))
+
+    if not source_items:
+        return report
+
+    lines = (report or "").splitlines()
+    blocks: list[tuple[int, int]] = []
+    current_start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*\d+\.\s+", line):
+            if current_start is not None:
+                blocks.append((current_start, i))
+            current_start = i
+    if current_start is not None:
+        blocks.append((current_start, len(lines)))
+
+    for start, end in reversed(blocks):
+        block_text = "\n".join(lines[start:end])
+        if TELEGRAM_URL_RE.search(block_text):
+            continue
+        block_tokens = _source_tokens(block_text)
+        if not block_tokens:
+            continue
+        best_link = None
+        best_score = 0
+        for tokens, link in source_items:
+            score = len(block_tokens & tokens)
+            if score > best_score:
+                best_score = score
+                best_link = link
+        if not best_link or best_score < 2:
+            continue
+
+        replaced = False
+        for i in range(start, end):
+            if SOURCE_LINE_RE.match(lines[i]) or INLINE_SOURCE_RE.search(lines[i]):
+                lines[i] = SOURCE_LINE_RE.sub(lambda m: f"{m.group('label')}{best_link}", lines[i])
+                inline = INLINE_SOURCE_RE.search(lines[i])
+                if inline:
+                    lines[i] = lines[i][:inline.start()] + f"{inline.group('label')}{best_link}"
+                replaced = True
+                break
+        if not replaced:
+            lines.insert(end, f"   Джерело: {best_link}")
+
+    return "\n".join(lines)
 
 
 def split_for_telegram(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -1079,7 +1150,7 @@ class AIService:
             return "⚠️ AI не зміг обробити повідомлення через ключі/ліміти. Перевір Gemini API keys або повтори трохи пізніше."
 
         if len(partials) == 1:
-            return clean_report_links(partials[0])
+            return fill_missing_report_sources(clean_report_links(partials[0]), messages)
 
         # Кожна частина підписана номером і вмістом, щоб при зведенні
         # було зрозуміло, з якого шматка бази походить інформація.
@@ -1095,7 +1166,8 @@ class AIService:
             + "\n\n".join(labeled)
         )
 
-        return clean_report_links(await self._complete(MERGE_SYSTEM, merge_user, max_output_tokens=1200))
+        final_report = await self._complete(MERGE_SYSTEM, merge_user, max_output_tokens=1200)
+        return fill_missing_report_sources(clean_report_links(final_report), messages)
 
     async def ask(self, question: str, messages: list[dict]) -> str:
         if not messages:

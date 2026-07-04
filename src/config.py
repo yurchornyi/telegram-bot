@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 from dataclasses import dataclass
@@ -61,10 +63,38 @@ def _collect_gemini_api_keys() -> Tuple[str, ...]:
         if value and value not in keys:
             keys.append(value)
 
-    if not keys and not _optional('GROQ_API_KEY'):
-        raise RuntimeError('Missing required env var: GEMINI_API_KEY або GROQ_API_KEY')
+    if not keys and not _collect_groq_api_keys() and not _collect_openrouter_api_keys():
+        raise RuntimeError('Missing required env var: GEMINI_API_KEY або GROQ_API_KEY або OPENROUTER_API_KEY')
 
     return tuple(keys)
+
+
+def _collect_api_keys(base_name: str, csv_name: str | None = None) -> Tuple[str, ...]:
+    keys: list[str] = []
+
+    if csv_name:
+        for value in _split_csv(os.getenv(csv_name, '')):
+            if value not in keys:
+                keys.append(value)
+
+    numbered_names = sorted(
+        (
+            name for name in os.environ
+            if re.fullmatch(fr'{re.escape(base_name)}_?\d+', name)
+        ),
+        key=lambda name: int(re.search(r'\d+', name).group(0)),
+    )
+
+    for name in (base_name, *numbered_names):
+        value = _optional(name)
+        if value and value not in keys:
+            keys.append(value)
+
+    return tuple(keys)
+
+
+def _collect_groq_api_keys() -> Tuple[str, ...]:
+    return _collect_api_keys('GROQ_API_KEY', 'GROQ_API_KEYS')
 
 
 def _collect_groq_models() -> Tuple[str, ...]:
@@ -84,6 +114,23 @@ def _collect_groq_models() -> Tuple[str, ...]:
         'llama-3.1-8b-instant': 1,
     }
     return tuple(sorted(models, key=lambda model: quality_order.get(model, 100)))
+
+
+def _collect_openrouter_api_keys() -> Tuple[str, ...]:
+    return _collect_api_keys('OPENROUTER_API_KEY', 'OPENROUTER_API_KEYS')
+
+
+def _collect_openrouter_models() -> Tuple[str, ...]:
+    models: list[str] = []
+    configured = _split_csv(os.getenv('OPENROUTER_MODELS', ''))
+    fallback_names = (
+        _optional('OPENROUTER_MODEL', 'openrouter/free'),
+        _optional('OPENROUTER_FALLBACK_MODEL', ''),
+    )
+    for model in (*configured, *fallback_names):
+        if model and model not in models:
+            models.append(model)
+    return tuple(models or ('openrouter/free',))
 
 
 def _parse_summary_times(value: str) -> Tuple[tuple[int, int], ...]:
@@ -150,8 +197,10 @@ class Config:
     owner_chat_id: int
     gemini_api_keys: Tuple[str, ...]
     gemini_model: str
-    groq_api_key: str
+    groq_api_keys: Tuple[str, ...]
     groq_models: Tuple[str, ...]
+    openrouter_api_keys: Tuple[str, ...]
+    openrouter_models: Tuple[str, ...]
     timezone: str
     summary_times: Tuple[tuple[int, int], ...]
     fetch_interval_seconds: int
@@ -177,8 +226,10 @@ def load_config() -> Config:
         owner_chat_id=_required_int('OWNER_CHAT_ID'),
         gemini_api_keys=_collect_gemini_api_keys(),
         gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip(),
-        groq_api_key=_optional('GROQ_API_KEY'),
+        groq_api_keys=_collect_groq_api_keys(),
         groq_models=_collect_groq_models(),
+        openrouter_api_keys=_collect_openrouter_api_keys(),
+        openrouter_models=_collect_openrouter_models(),
         timezone=_validate_timezone(os.getenv('TIMEZONE', 'Europe/Kyiv').strip()),
         summary_times=_parse_summary_times(os.getenv('SUMMARY_TIMES', '09:00,21:00')),
         fetch_interval_seconds=_optional_int('FETCH_INTERVAL_SECONDS', '300'),

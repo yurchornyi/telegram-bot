@@ -378,6 +378,11 @@ class Database:
         await db.commit()
         return cur.rowcount
 
+    async def checkpoint(self):
+        db = await self._get_conn()
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        await db.commit()
+
     async def get_user_memory(self) -> dict[str, str]:
         db = await self._get_conn()
         cur = await db.execute("SELECT key, value FROM user_memory ORDER BY key")
@@ -658,6 +663,43 @@ class Database:
         )
         row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def get_stats(self) -> dict:
+        db = await self._get_conn()
+
+        async def scalar(sql: str, params: tuple = ()) -> int:
+            cur = await db.execute(sql, params)
+            row = await cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+        since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        stats = {
+            "messages_total": await scalar("SELECT COUNT(*) FROM messages"),
+            "messages_24h": await scalar("SELECT COUNT(*) FROM messages WHERE date >= ?", (since_24h,)),
+            "chats_in_messages": await scalar("SELECT COUNT(DISTINCT chat_id) FROM messages"),
+            "monitored_active": await scalar("SELECT COUNT(*) FROM monitored_chats WHERE is_active = 1"),
+            "monitored_total": await scalar("SELECT COUNT(*) FROM monitored_chats"),
+            "ignored_chats": await scalar("SELECT COUNT(*) FROM ignored_chats"),
+            "failed_joins": await scalar("SELECT COUNT(*) FROM failed_chat_joins"),
+            "reports": await scalar("SELECT COUNT(*) FROM reports"),
+            "job_alerts": await scalar("SELECT COUNT(*) FROM job_alerts"),
+            "memory_items": await scalar("SELECT COUNT(*) FROM user_memory"),
+        }
+
+        cur = await db.execute("SELECT MIN(date), MAX(date) FROM messages")
+        row = await cur.fetchone()
+        stats["first_message_at"] = row[0] if row and row[0] else ""
+        stats["last_message_at"] = row[1] if row and row[1] else ""
+        stats["last_report_at"] = await self.get_meta("last_report_at", "") or ""
+        stats["reports_paused"] = "1" if await self.are_reports_paused() else "0"
+        stats["auto_search_enabled"] = await self.get_meta("auto_search_enabled", "0") or "0"
+        stats["auto_search_autojoin"] = await self.get_meta("auto_search_autojoin", "0") or "0"
+        stats["auto_search_last_run"] = await self.get_meta("auto_search_last_run", "") or ""
+        try:
+            stats["db_size_bytes"] = os.path.getsize(self.path)
+        except OSError:
+            stats["db_size_bytes"] = 0
+        return stats
 
     async def delete_older_than(self, days: int) -> int:
         """

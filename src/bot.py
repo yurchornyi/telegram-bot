@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import time
 import zipfile
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,7 @@ from telegram.ext import (
 )
 
 from .db import Database
-from .ai import AIService, split_for_telegram
+from .ai import AIService, is_market_overview_question, mask_sensitive_text, split_for_telegram
 
 logger = logging.getLogger("bot")
 if not logger.handlers:
@@ -62,6 +63,9 @@ class DigestBot:
         self.external_ai_urls = external_ai_urls or {}
         self.collector = None
         self.chat_search_task = None
+        self._overview_sync_lock = asyncio.Lock()
+        self._last_overview_sync_at = -1_000_000_000.0
+        self._overview_sync_cooldown_seconds = 180
         self.app = Application.builder().token(token).build()
         self._register()
 
@@ -74,6 +78,11 @@ class DigestBot:
             BotCommand('start', 'Відкрити меню'),
             BotCommand('menu', 'Показати нижнє меню'),
             BotCommand('m', 'Показати меню'),
+            BotCommand('help', 'Що вміє бот і команди'),
+            BotCommand('stats', 'Статистика бота'),
+            BotCommand('backup', 'Безпечний ZIP backup'),
+            BotCommand('test_ai', 'Перевірити Gemini/Groq'),
+            BotCommand('clear_old_messages', 'Очистити старі повідомлення'),
             BotCommand('summary', 'Звіт по нових повідомленнях'),
             BotCommand('ask', 'Питання по базі'),
             BotCommand('search', 'Пошук по базі: /search Таїланд'),
@@ -104,7 +113,8 @@ class DigestBot:
                 [KeyboardButton('➕ Додати чат'), KeyboardButton('➖ Видалити чат')],
                 [KeyboardButton('📋 Мої чати'), KeyboardButton('🔇 Пауза звітів')],
                 [KeyboardButton('🧠 Памʼять'), KeyboardButton('🤖 Автопошук чатів')],
-                [KeyboardButton('🧹 Очистити історію'), KeyboardButton('📤 Експорт')],
+                [KeyboardButton('📊 Статистика'), KeyboardButton('🧪 Тест AI')],
+                [KeyboardButton('🧹 Очистити історію'), KeyboardButton('📤 Backup')],
                 [KeyboardButton('⬅️ Назад')],
             ],
             resize_keyboard=True,
@@ -194,6 +204,11 @@ class DigestBot:
         self.app.add_handler(CommandHandler('start', self.start))
         self.app.add_handler(CommandHandler('menu', self.start))
         self.app.add_handler(CommandHandler('m', self.start))
+        self.app.add_handler(CommandHandler('help', self.help_command))
+        self.app.add_handler(CommandHandler('stats', self.stats_command))
+        self.app.add_handler(CommandHandler('backup', self.backup_command))
+        self.app.add_handler(CommandHandler('test_ai', self.test_ai_command))
+        self.app.add_handler(CommandHandler('clear_old_messages', self.clear_old_messages_command))
         self.app.add_handler(CommandHandler('summary', self.summary))
         self.app.add_handler(CommandHandler('ask', self.ask_command))
         self.app.add_handler(CommandHandler('memory', self.memory_menu))
@@ -207,7 +222,7 @@ class DigestBot:
         self.app.add_error_handler(self.on_error)
 
     def _friendly_error(self, exc: Exception) -> str:
-        text = str(exc)
+        text = mask_sensitive_text(exc)
         if 'Gemini API ліміт вичерпано' in text or 'Усі AI-провайдери недоступні' in text or '429' in text:
             return (
                 '⚠️ AI зараз не дає відповідь через ліміт.\n'
@@ -221,7 +236,7 @@ class DigestBot:
         return await update_or_query.message.reply_text(text, reply_markup=reply_markup)
 
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        logger.error("Необроблена помилка: %s", context.error, exc_info=context.error)
+        logger.error("Необроблена помилка: %s", mask_sensitive_text(context.error), exc_info=context.error)
         try:
             await self.app.bot.send_message(chat_id=self.owner_chat_id, text=self._friendly_error(context.error))
         except Exception:
@@ -234,6 +249,117 @@ class DigestBot:
         self._clear_ask_context(context)
         await update.message.reply_text(
             'Бот моніторингу працює. Вибери дію в меню.',
+            reply_markup=self.keyboard,
+        )
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._guard(update):
+            return
+        text = (
+            "🧭 Довідка\n\n"
+            "Основне:\n"
+            "/summary — короткий звіт по нових повідомленнях\n"
+            "/ask питання — спитати по базі\n"
+            "/search запит — пошук по базі\n"
+            "/my_chats — активні чати моніторингу\n\n"
+            "Сервіс:\n"
+            "/stats — статистика БД, чатів, AI і автопошуку\n"
+            "/backup — ZIP backup без .env і без Telegram session\n"
+            "/test_ai — коротко перевірити Gemini і Groq\n"
+            "/clear_old_messages — очистити повідомлення старше 90 днів\n"
+            "/clear_old_messages 30 — очистити старше 30 днів\n\n"
+            "Меню знизу можна повернути через /start або /menu."
+        )
+        await update.message.reply_text(text, reply_markup=self.keyboard)
+
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._guard(update):
+            return
+        stats = await self.db.get_stats()
+        top_chats = await self.db.top_chats(hours=24, limit=5)
+
+        def yes_no(value: str) -> str:
+            return "так" if value == "1" else "ні"
+
+        top_text = "\n".join(f"- {title}: {count}" for title, count in top_chats) or "- за 24 години активності немає"
+        text = (
+            "📊 Статистика бота\n\n"
+            f"Повідомлень у БД: {stats['messages_total']}\n"
+            f"За 24 години: {stats['messages_24h']}\n"
+            f"Чатів у повідомленнях: {stats['chats_in_messages']}\n"
+            f"Моніторинг чатів: {stats['monitored_active']}/{stats['monitored_total']} активні\n"
+            f"Ігнор чатів: {stats['ignored_chats']}\n"
+            f"Невдалі підписки: {stats['failed_joins']}\n"
+            f"Звітів в історії: {stats['reports']}\n"
+            f"Вакансій в історії: {stats['job_alerts']}\n"
+            f"Памʼять: {stats['memory_items']} записів\n"
+            f"Розмір БД: {self._format_bytes(stats['db_size_bytes'])}\n\n"
+            f"Перший msg: {self._format_dt(stats['first_message_at']) if stats['first_message_at'] else 'немає'}\n"
+            f"Останній msg: {self._format_dt(stats['last_message_at']) if stats['last_message_at'] else 'немає'}\n"
+            f"Останній звіт: {self._format_dt(stats['last_report_at']) if stats['last_report_at'] else 'немає'}\n\n"
+            f"Пауза звітів: {yes_no(stats['reports_paused'])}\n"
+            f"Автопошук: {yes_no(stats['auto_search_enabled'])}\n"
+            f"Автопідписка: {yes_no(stats['auto_search_autojoin'])}\n"
+            f"Останній автопошук: {self._format_dt(stats['auto_search_last_run']) if stats['auto_search_last_run'] else 'немає'}\n\n"
+            "Топ чатів за 24 години:\n"
+            f"{top_text}"
+        )
+        await self.send_long(text, reply_markup=self.keyboard)
+
+    async def backup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self.export_data(update, context)
+
+    async def test_ai_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._guard(update):
+            return
+        await update.message.reply_text("🧪 Перевіряю Gemini і Groq коротким запитом...", reply_markup=self.keyboard)
+        try:
+            result = await self.ai.test_providers()
+        except Exception as exc:
+            logger.error("test_ai: помилка: %s", mask_sensitive_text(exc))
+            await update.message.reply_text(self._friendly_error(exc), reply_markup=self.keyboard)
+            return
+
+        gemini = result["gemini"]
+        groq = result["groq"]
+        openrouter = result["openrouter"]
+        gemini_status = "✅ працює" if gemini["ok"] else ("⏸ не налаштований" if not gemini["enabled"] else f"❌ {gemini['error']}")
+        groq_status = "✅ працює" if groq["ok"] else ("⏸ не налаштований" if not groq["enabled"] else f"❌ {groq['error']}")
+        openrouter_status = "✅ працює" if openrouter["ok"] else ("⏸ не налаштований" if not openrouter["enabled"] else f"❌ {openrouter['error']}")
+        text = (
+            "🧪 AI тест\n\n"
+            f"Gemini: {gemini_status}\n"
+            f"Модель: {gemini['model']}\n"
+            f"Ключів: {gemini['keys']}\n\n"
+            f"Groq: {groq_status}\n"
+            f"Ключів: {groq['keys']}\n"
+            f"Моделі: {', '.join(groq['models']) if groq['models'] else 'немає'}\n\n"
+            f"OpenRouter: {openrouter_status}\n"
+            f"Ключів: {openrouter['keys']}\n"
+            f"Моделі: {', '.join(openrouter['models']) if openrouter['models'] else 'немає'}"
+        )
+        await update.message.reply_text(text, reply_markup=self.keyboard)
+
+    async def clear_old_messages_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._guard(update):
+            return
+        days = 90
+        if context.args:
+            try:
+                days = int(context.args[0])
+            except ValueError:
+                await update.message.reply_text("Напиши так: /clear_old_messages 30", reply_markup=self.keyboard)
+                return
+        days = max(7, min(365, days))
+        try:
+            deleted = await self.db.delete_older_than(days)
+        except Exception as exc:
+            logger.error("clear_old_messages: помилка: %s", mask_sensitive_text(exc))
+            await update.message.reply_text(self._friendly_error(exc), reply_markup=self.keyboard)
+            return
+        await update.message.reply_text(
+            f"🧹 Готово. Видалено старих повідомлень: {deleted}\n"
+            f"Поріг: старше {days} днів.",
             reply_markup=self.keyboard,
         )
 
@@ -345,6 +471,9 @@ class DigestBot:
         return ", ".join(parts)
 
     async def _auto_learn_memory(self, text: str):
+        if is_market_overview_question(text):
+            return
+
         updates = self._extract_memory_updates(text)
         current = await self.db.get_user_memory()
         try:
@@ -564,7 +693,11 @@ class DigestBot:
             await self.my_chats(update, context)
         elif text in ['🔇 пауза звітів', 'пауза звітів']:
             await self.toggle_reports_pause(update, context)
-        elif text in ['📤 експорт', 'експорт']:
+        elif text in ['📊 статистика', 'статистика']:
+            await self.stats_command(update, context)
+        elif text in ['🧪 тест ai', 'тест ai', 'тест іа', 'test ai']:
+            await self.test_ai_command(update, context)
+        elif text in ['📤 backup', 'backup', '📤 експорт', 'експорт']:
             await self.export_data(update, context)
         else:
             await update.message.reply_text('Не зрозумів. Натисни кнопку або команду.', reply_markup=self.keyboard)
@@ -936,14 +1069,10 @@ class DigestBot:
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("export.json", json.dumps(payload, ensure_ascii=False, indent=2))
 
+            await self.db.checkpoint()
             db_path = Path(self.db.path)
             if db_path.exists():
-                zf.write(db_path, "digest.sqlite3")
-
-            session_base = Path((await self.db.get_meta("session_path", "")) or "data/telegram_user")
-            for candidate in [session_base, session_base.with_suffix(".session")]:
-                if candidate.exists():
-                    zf.write(candidate, candidate.name)
+                zf.write(db_path, db_path.name)
 
             env_example = (
                 "BOT_TOKEN=...\n"
@@ -959,11 +1088,14 @@ class DigestBot:
             zf.writestr("env.example", env_example)
 
         archive.seek(0)
-        archive.name = f"telegram_bot_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.zip"
+        archive.name = f"telegram_bot_backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.zip"
         await update.message.reply_document(
             document=archive,
             filename=archive.name,
-            caption="📤 Експорт готовий: база, памʼять, чати, звіти і session якщо файл знайдено. Секрети з .env не додавав.",
+            caption=(
+                "📤 Backup готовий: SQLite база + JSON експорт + env.example.\n"
+                "Без .env і без Telegram session-файлу, щоб не світити доступ до акаунта."
+            ),
             reply_markup=self.settings_keyboard,
         )
 
@@ -1590,6 +1722,32 @@ class DigestBot:
             reply_markup=self.ask_keyboard,
         )
 
+    async def _sync_recent_for_overview(self) -> int | None:
+        if not self.collector:
+            return None
+
+        now = time.monotonic()
+        if now - self._last_overview_sync_at < self._overview_sync_cooldown_seconds:
+            return None
+
+        async with self._overview_sync_lock:
+            now = time.monotonic()
+            if now - self._last_overview_sync_at < self._overview_sync_cooldown_seconds:
+                return None
+
+            self._last_overview_sync_at = now
+            try:
+                return await asyncio.wait_for(
+                    self.collector.sync_monitored_recent(hours=24, per_chat_limit=50),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("overview sync timeout; відповідаю по наявній базі")
+                return None
+            except Exception as exc:
+                logger.warning("overview sync failed: %s", mask_sensitive_text(exc))
+                return None
+
     async def _answer_question(self, update: Update, context: ContextTypes.DEFAULT_TYPE, question: str):
         await update.message.reply_text('Думаю по базі повідомлень...', reply_markup=self.ask_keyboard)
         try:
@@ -1599,17 +1757,32 @@ class DigestBot:
                 str(context.user_data.get("context_summary", ""))[-1200:],
                 " ".join(item.get("question", "") for item in (context.user_data.get("dialog_history") or [])[-3:]),
             ])
-            messages = await self.db.search(search_context, limit=250)
+            overview_question = is_market_overview_question(question)
+            if overview_question:
+                added = await self._sync_recent_for_overview()
+                if added:
+                    logger.info("overview question: перед відповіддю додано %s свіжих повідомлень", added)
+                messages = await self.db.get_recent_messages(hours=24, limit=1000)
+            else:
+                messages = await self.db.search(search_context, limit=250)
             memory = await self.db.get_user_memory()
             memory_text = self._format_memory(memory)
             history_text = self._format_dialog_history(context.user_data.get("dialog_history") or [])
             context_summary = context.user_data.get("context_summary", "")
             if not messages:
-                answer = (
-                    "У моїй базі мало інформації по цьому питанню або прямих згадок немає.\n\n"
-                    "Можу продовжити, якщо ти уточниш партнерку / GEO / вертикаль, або запусти “🔍 Пошук чатів”, "
-                    "щоб добрати нові джерела."
-                )
+                if overview_question:
+                    answer = (
+                        "За останні 24 години в базі немає нових повідомлень, тому сказати "
+                        "що сьогодні було важливо, нема з чого.\n\n"
+                        "Коли collector підтягне нові повідомлення, на це питання дам коротко: "
+                        "що ллють, GEO/офери/цифри, проблеми з ads/акаунтами і посилання на джерела."
+                    )
+                else:
+                    answer = (
+                        "У моїй базі мало інформації по цьому питанню або прямих згадок немає.\n\n"
+                        "Можу продовжити, якщо ти уточниш партнерку / GEO / вертикаль, або запусти “🔍 Пошук чатів”, "
+                        "щоб добрати нові джерела."
+                    )
                 self._append_dialog_history(context, question, answer)
                 await update.message.reply_text(answer, reply_markup=self.ask_keyboard)
                 return
@@ -1778,6 +1951,14 @@ class DigestBot:
             return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')
         except Exception:
             return value[:16]
+
+    def _format_bytes(self, value: int) -> str:
+        size = float(value or 0)
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size < 1024 or unit == "GB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+            size /= 1024
+        return f"{int(value or 0)} B"
 
     async def start_polling(self):
         await self.app.initialize()

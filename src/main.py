@@ -39,8 +39,10 @@ async def main():
         cfg.gemini_api_keys,
         cfg.gemini_model,
         cfg.max_input_chars,
-        groq_api_key=cfg.groq_api_key,
+        groq_api_keys=cfg.groq_api_keys,
         groq_models=cfg.groq_models,
+        openrouter_api_keys=cfg.openrouter_api_keys,
+        openrouter_models=cfg.openrouter_models,
     )
     bot = DigestBot(
         cfg.bot_token,

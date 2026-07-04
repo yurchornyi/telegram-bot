@@ -18,6 +18,37 @@ if not logger.handlers:
 
 TELEGRAM_LIMIT = 4096
 TRUNCATED_WARNING = "⚠️ Відповідь обірвана через ліміт довжини. Частину даних може бути не показано."
+SECRET_PATTERNS = [
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),
+    re.compile(r"\bAQ\.[0-9A-Za-z_\-\.]{20,}\b"),
+    re.compile(r"\bgsk_[0-9A-Za-z_\-]{20,}\b"),
+    re.compile(r"\bsk-or-v1-[0-9A-Za-z_\-]{20,}\b"),
+    re.compile(r"\b\d{8,12}:[0-9A-Za-z_\-]{25,}\b"),
+]
+
+
+def mask_sensitive_text(value: object) -> str:
+    text = str(value)
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(lambda m: f"{m.group(0)[:6]}...{m.group(0)[-4:]}", text)
+    return text
+
+
+def polish_ukrainian_answer(text: str) -> str:
+    replacements = {
+        "Тестирувати": "Тестувати",
+        "тестирувати": "тестувати",
+        "Тестируй": "Тестуй",
+        "тестируй": "тестуй",
+        "Тестируйте": "Тестуйте",
+        "тестируйте": "тестуйте",
+        "джерело:https://": "Джерело: https://",
+        "Джерело:https://": "Джерело: https://",
+    }
+    polished = text or ""
+    for old, new in replacements.items():
+        polished = polished.replace(old, new)
+    return polished
 
 
 class GeminiRateLimitError(RuntimeError):
@@ -133,12 +164,24 @@ MERGE_SYSTEM = """Зведи часткові дайджести в один к�
 - в кінці дай 2-3 короткі дії.
 """
 
-ASK_SYSTEM = """Ти відповідаєш по базі повідомлень Telegram для медіабаєра. Відповідай українською. Якщо в повідомленнях нема відповіді — прямо скажи, що нема даних. Не вигадуй. Додавай джерела/посилання, якщо вони є.
+ASK_SYSTEM = """Ти відповідаєш по базі повідомлень Telegram як практичний помічник медіабаєра/арбітражника.
+Відповідай тільки українською, коротко і по суті. Якщо в повідомленнях нема відповіді — прямо скажи, що нема даних. Не вигадуй.
+
+Якщо питання загальне типу "що сьогодні говорили", "що по чатах", "що ллють", "що по суті", "які теми зараз":
+- відповідай тільки по арбітражній суті: що ллють, вертикаль, GEO, джерело трафіку, офер, CPA/AR/CR/EPC/payout/approve, ленд/преленд, креативи, проблеми з Facebook/Google/TikTok Ads, акаунтами, оплатою, банами;
+- не показуй вакансії, hiring, пошук роботи, вебінари, курси, рефералки, побут, правила чату, капчу, модерацію, флуд;
+- якщо конкретики по заливах немає, напиши: "По суті по заливах конкретики немає."
+
+Додавай джерела/посилання до кожного факту, якщо вони є. `Джерело` бери тільки з Telegram-link у полі `link=`.
+Якщо в одному списку кілька фактів з різних повідомлень, кожен пункт має мати своє джерело на тому самому рядку або одразу під пунктом.
+Не став одне джерело в кінці для кількох різних фактів.
+Якщо користувач просить "одне", "один варіант", "що тестити першим" — дай рівно один вибір, 2-4 рядки, але все одно додай `Джерело: ...`.
 
 Якщо тобі надіслали тільки ЧАСТИНУ бази повідомлень (одна частина з кількох) — відповідай тільки по тому, що бачиш у цій частині, і не стверджуй, що це вся база."""
 
 ASK_MERGE_SYSTEM = """Ти зводиш кілька часткових відповідей на одне питання (кожна відповідь базувалась на своїй частині бази повідомлень) в одну фінальну відповідь.
 Об'єднай факти, прибери повтори і суперечності (якщо є суперечність — зазнач обидва варіанти і вкажи джерела).
+Якщо питання про те, "що ллють / що по суті / що говорили сьогодні", залиш тільки арбітражну суть: вертикалі, GEO, офери, цифри, джерела трафіку, апрув, ленди/преленди, проблеми запусків. Не додавай вакансії, вебінари, курси, рефералки, модерацію або флуд.
 Не вигадуй нічого нового понад те, що було в часткових відповідях.
 Пиши українською, коротко і по суті."""
 
@@ -706,6 +749,10 @@ REPORT_EXCLUDE_MARKERS = {
     "для подальшої участі", "для дальнейшего участия", "captcha", "капча",
     "rules", "правила чату", "правила группы", "натисніть кнопку", "нажмите кнопку",
     "welcome", "добро пожаловать",
+    "вебінар", "вебинар", "webinar", "курс", "навчання", "обучение",
+    "реферал", "рефераль", "referral", "рефка", "рефку",
+    "напад на чат", "атака на чат", "чат атак", "тцк",
+    "розіграш", "розыгрыш", "конкурс", "giveaway",
 }
 
 REPORT_INCLUDE_MARKERS = IMPORTANT_INCLUDE_MARKERS | {
@@ -758,6 +805,25 @@ def filter_general_report_messages(messages: list[dict]) -> list[dict]:
     return filtered
 
 
+MARKET_OVERVIEW_QUESTION_MARKERS = {
+    "що сьогодні", "шо сьогодні", "що сегод", "шо сегод", "що сього", "шо сього",
+    "що в чатах", "шо в чатах", "що по чатах", "шо по чатах",
+    "що говорили", "шо говорили", "про що говорили", "про шо говорили",
+    "що було важливо", "шо було важливо", "важливе сьогодні", "важливо сьогодні",
+    "що ллють", "шо ллють", "що заливають", "шо заливають",
+    "що залива", "шо залива", "що по заливах", "шо по заливах",
+    "що по суті", "шо по суті", "що по ринку", "шо по ринку",
+    "дай вижимку", "коротка вижимка", "по суті",
+}
+
+
+def is_market_overview_question(question: str) -> bool:
+    normalized = " ".join((question or "").casefold().split())
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in MARKET_OVERVIEW_QUESTION_MARKERS)
+
+
 class AIService:
     def __init__(
         self,
@@ -765,20 +831,36 @@ class AIService:
         model: str,
         max_input_chars: int,
         groq_api_key: str = "",
+        groq_api_keys: str | list[str] | tuple[str, ...] | None = None,
         groq_models: list[str] | tuple[str, ...] | None = None,
+        openrouter_api_keys: str | list[str] | tuple[str, ...] | None = None,
+        openrouter_models: list[str] | tuple[str, ...] | None = None,
     ):
         if isinstance(api_keys, str):
             raw_keys = [part.strip() for part in api_keys.split(",") if part.strip()]
         else:
             raw_keys = [key.strip() for key in api_keys if key.strip()]
 
-        self.groq_api_key = groq_api_key.strip()
+        if groq_api_keys is None:
+            raw_groq_keys = [groq_api_key.strip()] if groq_api_key.strip() else []
+        elif isinstance(groq_api_keys, str):
+            raw_groq_keys = [part.strip() for part in groq_api_keys.split(",") if part.strip()]
+        else:
+            raw_groq_keys = [key.strip() for key in groq_api_keys if key.strip()]
+
+        if isinstance(openrouter_api_keys, str):
+            raw_openrouter_keys = [part.strip() for part in openrouter_api_keys.split(",") if part.strip()]
+        else:
+            raw_openrouter_keys = [key.strip() for key in (openrouter_api_keys or ()) if key.strip()]
+
+        self.groq_api_keys = [key for key in raw_groq_keys if key.startswith("gsk_")]
+        self.openrouter_api_keys = [key for key in raw_openrouter_keys if key.startswith("sk-or-")]
         keys = [key for key in raw_keys if self._looks_like_gemini_key(key)]
         skipped_keys = len(raw_keys) - len(keys)
         if skipped_keys:
             logger.warning("AIService: пропущено %s Gemini ключів з неправильним форматом", skipped_keys)
-        if not keys and not self.groq_api_key:
-            raise RuntimeError("AIService requires at least one valid Gemini API key or Groq API key")
+        if not keys and not self.groq_api_keys and not self.openrouter_api_keys:
+            raise RuntimeError("AIService requires at least one valid Gemini, Groq or OpenRouter API key")
 
         self.api_keys = keys
         self.model = model
@@ -790,6 +872,7 @@ class AIService:
         self.gemini_thinking_budget = os.getenv("GEMINI_THINKING_BUDGET", "0").strip()
         self._gemini_lock = asyncio.Lock()
         self._gemini_last_request_at: dict[int, float] = {}
+        self._gemini_key_cooldown_until: dict[int, float] = {}
 
         self.groq_models = [
             model.strip()
@@ -801,17 +884,60 @@ class AIService:
         self.groq_max_input_chars = int(os.getenv("GROQ_MAX_INPUT_CHARS", "12000"))
         self.groq_min_request_interval = float(os.getenv("GROQ_MIN_REQUEST_INTERVAL", "2"))
         self._groq_lock = asyncio.Lock()
-        self._groq_last_request_at = 0.0
+        self._groq_last_request_at: dict[int, float] = {}
+        self._groq_key_cooldown_until: dict[int, float] = {}
+
+        self.openrouter_models = [
+            model.strip()
+            for model in (openrouter_models or ("openrouter/free",))
+            if model.strip()
+        ]
+        self.openrouter_max_output_tokens = int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "1200"))
+        self.openrouter_safe_max_output_tokens = int(os.getenv("OPENROUTER_SAFE_MAX_OUTPUT_TOKENS", "900"))
+        self.openrouter_max_input_chars = int(os.getenv("OPENROUTER_MAX_INPUT_CHARS", "7000"))
+        self.openrouter_min_request_interval = float(os.getenv("OPENROUTER_MIN_REQUEST_INTERVAL", "10"))
+        self._openrouter_lock = asyncio.Lock()
+        self._openrouter_last_request_at: dict[int, float] = {}
+        self._openrouter_key_cooldown_until: dict[int, float] = {}
         logger.info(
-            "AIService: Gemini keys=%s, Gemini model=%s, Groq fallback=%s",
+            "AIService: Gemini keys=%s, Gemini model=%s, Groq keys=%s, OpenRouter keys=%s",
             len(self.api_keys),
             self.model,
-            "on" if self.groq_api_key else "off",
+            len(self.groq_api_keys),
+            len(self.openrouter_api_keys),
         )
 
     @staticmethod
     def _looks_like_gemini_key(key: str) -> bool:
         return (key.startswith("AIza") or key.startswith("AQ.")) and len(key) >= 30
+
+    @staticmethod
+    def _retry_after_seconds(text: str, default: float = 60.0) -> float:
+        raw = text or ""
+        json_match = re.search(r'"retry_after_seconds(?:_raw)?"\s*:\s*([0-9.]+)', raw, re.IGNORECASE)
+        if json_match:
+            try:
+                return max(1.0, float(json_match.group(1)))
+            except ValueError:
+                pass
+
+        minute_match = re.search(r"(?:retry|try again) (?:in|after) ([0-9.]+)m([0-9.]+)s", raw, re.IGNORECASE)
+        if minute_match:
+            try:
+                return max(1.0, float(minute_match.group(1)) * 60 + float(minute_match.group(2)))
+            except ValueError:
+                pass
+
+        match = re.search(r"(?:retry|try again) (?:in|after) ([0-9.]+)(ms|s)", raw, re.IGNORECASE)
+        if not match:
+            return default
+        try:
+            value = float(match.group(1))
+            if match.group(2).lower() == "ms":
+                value /= 1000
+            return max(1.0, value)
+        except ValueError:
+            return default
 
     async def _throttled_gemini_post(self, key_index: int, url: str, payload: dict) -> httpx.Response:
         async with self._gemini_lock:
@@ -826,9 +952,9 @@ class AIService:
             self._gemini_last_request_at[key_index] = time.monotonic()
             return response
 
-    async def _throttled_groq_post(self, payload: dict) -> httpx.Response:
+    async def _throttled_groq_post(self, key_index: int, payload: dict) -> httpx.Response:
         async with self._groq_lock:
-            elapsed = time.monotonic() - self._groq_last_request_at
+            elapsed = time.monotonic() - self._groq_last_request_at.get(key_index, 0.0)
             wait_for = self.groq_min_request_interval - elapsed
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
@@ -836,11 +962,32 @@ class AIService:
             async with httpx.AsyncClient(timeout=180) as client:
                 response = await client.post(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {self.groq_api_key}"},
+                    headers={"Authorization": f"Bearer {self.groq_api_keys[key_index]}"},
                     json=payload,
                 )
 
-            self._groq_last_request_at = time.monotonic()
+            self._groq_last_request_at[key_index] = time.monotonic()
+            return response
+
+    async def _throttled_openrouter_post(self, key_index: int, payload: dict) -> httpx.Response:
+        async with self._openrouter_lock:
+            elapsed = time.monotonic() - self._openrouter_last_request_at.get(key_index, 0.0)
+            wait_for = self.openrouter_min_request_interval - elapsed
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+
+            async with httpx.AsyncClient(timeout=180) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.openrouter_api_keys[key_index]}",
+                        "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "https://local.telegram-bot"),
+                        "X-OpenRouter-Title": os.getenv("OPENROUTER_APP_TITLE", "Telegram Arbitrage Monitor"),
+                    },
+                    json=payload,
+                )
+
+            self._openrouter_last_request_at[key_index] = time.monotonic()
             return response
 
     async def _complete(
@@ -851,20 +998,46 @@ class AIService:
         retries: int | None = None,
     ) -> str:
         if not self.api_keys:
-            if self.groq_api_key and self.groq_models:
-                return await self._complete_groq(system, user, max_output_tokens)
-            raise AIProviderUnavailableError("Немає валідних Gemini ключів і Groq fallback вимкнений")
+            if self.groq_api_keys and self.groq_models:
+                try:
+                    return await self._complete_groq(system, user, max_output_tokens)
+                except Exception as groq_exc:
+                    if self.openrouter_api_keys and self.openrouter_models:
+                        logger.warning("Groq недоступний, пробую OpenRouter fallback: %s", mask_sensitive_text(groq_exc))
+                        return await self._complete_openrouter(system, user, max_output_tokens)
+                    raise
+            if self.openrouter_api_keys and self.openrouter_models:
+                return await self._complete_openrouter(system, user, max_output_tokens)
+            raise AIProviderUnavailableError("Немає валідних AI ключів")
 
         try:
             return await self._complete_gemini(system, user, max_output_tokens, retries)
         except Exception as gemini_exc:
-            if self.groq_api_key and self.groq_models:
-                logger.warning("Gemini недоступний, пробую Groq fallback: %s", gemini_exc)
+            if self.groq_api_keys and self.groq_models:
+                logger.warning("Gemini недоступний, пробую Groq fallback: %s", mask_sensitive_text(gemini_exc))
                 try:
                     return await self._complete_groq(system, user, max_output_tokens)
                 except Exception as groq_exc:
-                    logger.error("Groq fallback теж не спрацював: %s", groq_exc)
-                    raise RuntimeError(f"Усі AI-провайдери недоступні. Gemini: {gemini_exc}; Groq: {groq_exc}") from groq_exc
+                    logger.error("Groq fallback теж не спрацював: %s", mask_sensitive_text(groq_exc))
+                    if self.openrouter_api_keys and self.openrouter_models:
+                        try:
+                            return await self._complete_openrouter(system, user, max_output_tokens)
+                        except Exception as openrouter_exc:
+                            logger.error("OpenRouter fallback теж не спрацював: %s", mask_sensitive_text(openrouter_exc))
+                            raise RuntimeError(
+                                f"Усі AI-провайдери недоступні. "
+                                f"Gemini: {mask_sensitive_text(gemini_exc)}; "
+                                f"Groq: {mask_sensitive_text(groq_exc)}; "
+                                f"OpenRouter: {mask_sensitive_text(openrouter_exc)}"
+                            ) from openrouter_exc
+                    raise RuntimeError(
+                        f"Усі AI-провайдери недоступні. "
+                        f"Gemini: {mask_sensitive_text(gemini_exc)}; "
+                        f"Groq: {mask_sensitive_text(groq_exc)}"
+                    ) from groq_exc
+            if self.openrouter_api_keys and self.openrouter_models:
+                logger.warning("Gemini недоступний, пробую OpenRouter fallback: %s", mask_sensitive_text(gemini_exc))
+                return await self._complete_openrouter(system, user, max_output_tokens)
             raise
 
     async def _complete_gemini(
@@ -896,23 +1069,46 @@ class AIService:
         last_error: Exception | None = None
 
         for key_index in range(len(self.api_keys)):
+            cooldown_until = self._gemini_key_cooldown_until.get(key_index, 0.0)
+            if cooldown_until > time.monotonic():
+                remaining = cooldown_until - time.monotonic()
+                logger.info(
+                    "Gemini key %s/%s тимчасово пропущено через cooldown %.1fs",
+                    key_index + 1,
+                    len(self.api_keys),
+                    remaining,
+                )
+                last_error = GeminiRateLimitError("Gemini key тимчасово на cooldown після 429.")
+                continue
+
             for attempt in range(1, retries + 1):
                 try:
                     response = await self._throttled_gemini_post(key_index, url, payload)
 
                     if response.status_code == 429:
-                        logger.warning("Gemini key %s/%s отримав 429: %s", key_index + 1, len(self.api_keys), response.text[:600])
+                        logger.warning("Gemini key %s/%s отримав 429: %s", key_index + 1, len(self.api_keys), mask_sensitive_text(response.text[:600]))
+                        retry_after = self._retry_after_seconds(response.text, default=self.gemini_retry_delay)
+                        self._gemini_key_cooldown_until[key_index] = time.monotonic() + retry_after + 1
                         last_error = GeminiRateLimitError(
                             "Gemini API ліміт вичерпано або перевищено rate limit."
                         )
                         break
 
                     if response.status_code >= 500:
-                        raise RuntimeError(f"Gemini API тимчасова помилка {response.status_code}: {response.text[:300]}")
+                        raise RuntimeError(f"Gemini API тимчасова помилка {response.status_code}: {mask_sensitive_text(response.text[:300])}")
 
                     if response.status_code >= 400:
                         # інші 4xx (наприклад, неправильний ключ) немає сенсу повторювати на цьому ж ключі
-                        last_error = RuntimeError(f"Gemini API error {response.status_code}: {response.text[:1000]}")
+                        last_error = RuntimeError(f"Gemini API error {response.status_code}: {mask_sensitive_text(response.text[:1000])}")
+                        auth_error_markers = (
+                            "API_KEY_INVALID",
+                            "API key not valid",
+                            "UNAUTHENTICATED",
+                            "invalid authentication credentials",
+                            "ACCESS_TOKEN_TYPE_UNSUPPORTED",
+                        )
+                        if any(marker in response.text for marker in auth_error_markers):
+                            self._gemini_key_cooldown_until[key_index] = time.monotonic() + 24 * 60 * 60
                         logger.warning("Gemini key %s/%s отримав %s", key_index + 1, len(self.api_keys), response.status_code)
                         break
 
@@ -945,15 +1141,15 @@ class AIService:
                         len(self.api_keys),
                         attempt,
                         retries,
-                        exc,
+                        mask_sensitive_text(exc),
                     )
                     if isinstance(exc, GeminiRateLimitError):
                         break
                     if attempt < retries:
                         await asyncio.sleep(self.gemini_retry_delay)
 
-        logger.error("Усі Gemini ключі/спроби провалились: %s", last_error)
-        raise AIProviderUnavailableError(f"Gemini API недоступний: {last_error}")
+        logger.error("Усі Gemini ключі/спроби провалились: %s", mask_sensitive_text(last_error))
+        raise AIProviderUnavailableError(f"Gemini API недоступний: {mask_sensitive_text(last_error)}")
 
     def _compact_for_groq(self, user: str) -> str:
         if len(user) <= self.groq_max_input_chars:
@@ -996,60 +1192,207 @@ class AIService:
         max_tokens = min(max_output_tokens, self.groq_max_output_tokens, self.groq_safe_max_output_tokens)
         compact_user = self._compact_for_groq(user)
 
-        for model in self.groq_models:
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": compact_user},
-                ],
-                "temperature": 0.15,
-                "max_tokens": max_tokens,
-            }
+        for key_index in range(len(self.groq_api_keys)):
+            cooldown_until = self._groq_key_cooldown_until.get(key_index, 0.0)
+            if cooldown_until > time.monotonic():
+                remaining = cooldown_until - time.monotonic()
+                logger.info("Groq key %s/%s пропущено через cooldown %.1fs", key_index + 1, len(self.groq_api_keys), remaining)
+                last_error = GroqRateLimitError("Groq key тимчасово на cooldown.")
+                continue
 
-            try:
-                response = await self._throttled_groq_post(payload)
+            for model in self.groq_models:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": compact_user},
+                    ],
+                    "temperature": 0.15,
+                    "max_tokens": max_tokens,
+                }
 
-                if response.status_code == 429:
-                    last_error = GroqRateLimitError(f"Groq model {model} rate limit: {response.text[:600]}")
-                    logger.warning("%s", last_error)
-                    continue
-
-                if response.status_code >= 500:
-                    last_error = RuntimeError(f"Groq API тимчасова помилка {response.status_code}: {response.text[:300]}")
-                    logger.warning("%s", last_error)
-                    continue
-
-                if response.status_code >= 400:
-                    last_error = RuntimeError(f"Groq API error {response.status_code}: {response.text[:600]}")
-                    logger.warning("%s", last_error)
-                    continue
-
-                data = response.json()
                 try:
-                    choice = data["choices"][0]
-                    text = choice["message"]["content"].strip()
-                    finish_reason = choice.get("finish_reason")
-                except (KeyError, IndexError, TypeError):
-                    text = ""
-                    finish_reason = None
+                    response = await self._throttled_groq_post(key_index, payload)
 
-                if not text:
-                    raise RuntimeError(f"Groq API returned empty response: {str(data)[:1000]}")
+                    if response.status_code == 429:
+                        last_error = GroqRateLimitError(f"Groq key {key_index + 1}/{len(self.groq_api_keys)} model {model} rate limit: {mask_sensitive_text(response.text[:600])}")
+                        self._groq_key_cooldown_until[key_index] = time.monotonic() + self._retry_after_seconds(response.text, default=60) + 1
+                        logger.warning("%s", last_error)
+                        continue
 
-                if finish_reason == "length":
-                    logger.warning("Відповідь Groq обірвана через max_tokens (запит %s символів)", len(compact_user))
+                    if response.status_code >= 500:
+                        last_error = RuntimeError(f"Groq API тимчасова помилка {response.status_code}: {mask_sensitive_text(response.text[:300])}")
+                        logger.warning("%s", last_error)
+                        continue
 
-                logger.info("Groq fallback відповів через модель %s", model)
-                return text
+                    if response.status_code >= 400:
+                        last_error = RuntimeError(f"Groq API error {response.status_code}: {mask_sensitive_text(response.text[:600])}")
+                        if response.status_code in {401, 403}:
+                            self._groq_key_cooldown_until[key_index] = time.monotonic() + 24 * 60 * 60
+                        logger.warning("%s", last_error)
+                        continue
 
-            except (httpx.TransportError, RuntimeError) as exc:
-                last_error = exc
-                logger.warning("Groq model %s не відповів: %s", model, exc)
-                if not isinstance(exc, GroqRateLimitError):
+                    data = response.json()
+                    try:
+                        choice = data["choices"][0]
+                        text = choice["message"]["content"].strip()
+                        finish_reason = choice.get("finish_reason")
+                    except (KeyError, IndexError, TypeError):
+                        text = ""
+                        finish_reason = None
+
+                    if not text:
+                        raise RuntimeError(f"Groq API returned empty response: {str(data)[:1000]}")
+
+                    if finish_reason == "length":
+                        logger.warning("Відповідь Groq обірвана через max_tokens (запит %s символів)", len(compact_user))
+
+                    logger.info("Groq fallback відповів через key %s/%s, модель %s", key_index + 1, len(self.groq_api_keys), model)
+                    return text
+
+                except (httpx.TransportError, RuntimeError) as exc:
+                    last_error = exc
+                    logger.warning("Groq key %s/%s model %s не відповів: %s", key_index + 1, len(self.groq_api_keys), model, mask_sensitive_text(exc))
+                    if not isinstance(exc, GroqRateLimitError):
+                        break
+
+        raise AIProviderUnavailableError(f"Groq API недоступний: {mask_sensitive_text(last_error)}")
+
+    def _compact_for_openrouter(self, user: str) -> str:
+        if len(user) <= self.openrouter_max_input_chars:
+            return user
+        head = user[: max(1000, self.openrouter_max_input_chars // 3)]
+        tail_budget = self.openrouter_max_input_chars - len(head) - 300
+        tail = user[-tail_budget:] if tail_budget > 0 else ""
+        return f"{head}\n\n[Середину запиту скорочено для OpenRouter fallback.]\n\n{tail}"
+
+    async def _complete_openrouter(self, system: str, user: str, max_output_tokens: int) -> str:
+        last_error: Exception | None = None
+        max_tokens = min(max_output_tokens, self.openrouter_max_output_tokens, self.openrouter_safe_max_output_tokens)
+        compact_user = self._compact_for_openrouter(user)
+
+        for key_index in range(len(self.openrouter_api_keys)):
+            cooldown_until = self._openrouter_key_cooldown_until.get(key_index, 0.0)
+            if cooldown_until > time.monotonic():
+                remaining = cooldown_until - time.monotonic()
+                logger.info("OpenRouter key %s/%s пропущено через cooldown %.1fs", key_index + 1, len(self.openrouter_api_keys), remaining)
+                last_error = AIProviderUnavailableError("OpenRouter key тимчасово на cooldown.")
+                continue
+
+            for model in self.openrouter_models:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": compact_user},
+                    ],
+                    "temperature": 0.15,
+                    "max_tokens": max_tokens,
+                }
+                try:
+                    response = await self._throttled_openrouter_post(key_index, payload)
+
+                    if response.status_code == 429:
+                        last_error = AIProviderUnavailableError(
+                            f"OpenRouter key {key_index + 1}/{len(self.openrouter_api_keys)} model {model} rate limit: "
+                            f"{mask_sensitive_text(response.text[:600])}"
+                        )
+                        self._openrouter_key_cooldown_until[key_index] = time.monotonic() + self._retry_after_seconds(response.text, default=60) + 1
+                        logger.warning("%s", last_error)
+                        continue
+
+                    if response.status_code >= 500:
+                        last_error = RuntimeError(f"OpenRouter API тимчасова помилка {response.status_code}: {mask_sensitive_text(response.text[:300])}")
+                        logger.warning("%s", last_error)
+                        continue
+
+                    if response.status_code >= 400:
+                        last_error = RuntimeError(f"OpenRouter API error {response.status_code}: {mask_sensitive_text(response.text[:600])}")
+                        if response.status_code in {401, 403}:
+                            self._openrouter_key_cooldown_until[key_index] = time.monotonic() + 24 * 60 * 60
+                        logger.warning("%s", last_error)
+                        continue
+
+                    data = response.json()
+                    try:
+                        choice = data["choices"][0]
+                        text = choice["message"]["content"].strip()
+                        finish_reason = choice.get("finish_reason")
+                    except (KeyError, IndexError, TypeError):
+                        text = ""
+                        finish_reason = None
+
+                    if not text:
+                        raise RuntimeError(f"OpenRouter API returned empty response: {str(data)[:1000]}")
+
+                    if finish_reason == "length":
+                        logger.warning("Відповідь OpenRouter обірвана через max_tokens (запит %s символів)", len(compact_user))
+
+                    logger.info("OpenRouter fallback відповів через key %s/%s, модель %s", key_index + 1, len(self.openrouter_api_keys), model)
+                    return text
+
+                except (httpx.TransportError, RuntimeError) as exc:
+                    last_error = exc
+                    logger.warning(
+                        "OpenRouter key %s/%s model %s не відповів: %s",
+                        key_index + 1,
+                        len(self.openrouter_api_keys),
+                        model,
+                        mask_sensitive_text(exc),
+                    )
                     break
 
-        raise AIProviderUnavailableError(f"Groq API недоступний: {last_error}")
+        raise AIProviderUnavailableError(f"OpenRouter API недоступний: {mask_sensitive_text(last_error)}")
+
+    async def test_providers(self) -> dict:
+        system = "Відповідай рівно одним словом: OK"
+        user = "Перевірка доступності AI. Відповідай OK."
+        result = {
+            "gemini": {
+                "enabled": bool(self.api_keys),
+                "keys": len(self.api_keys),
+                "model": self.model,
+                "ok": False,
+                "error": "",
+            },
+            "groq": {
+                "enabled": bool(self.groq_api_keys and self.groq_models),
+                "keys": len(self.groq_api_keys),
+                "models": list(self.groq_models),
+                "ok": False,
+                "error": "",
+            },
+            "openrouter": {
+                "enabled": bool(self.openrouter_api_keys and self.openrouter_models),
+                "keys": len(self.openrouter_api_keys),
+                "models": list(self.openrouter_models),
+                "ok": False,
+                "error": "",
+            },
+        }
+
+        if self.api_keys:
+            try:
+                await self._complete_gemini(system, user, max_output_tokens=8, retries=1)
+                result["gemini"]["ok"] = True
+            except Exception as exc:
+                result["gemini"]["error"] = self._public_ai_error(exc)
+
+        if self.groq_api_keys and self.groq_models:
+            try:
+                await self._complete_groq(system, user, max_output_tokens=8)
+                result["groq"]["ok"] = True
+            except Exception as exc:
+                result["groq"]["error"] = self._public_ai_error(exc)
+
+        if self.openrouter_api_keys and self.openrouter_models:
+            try:
+                await self._complete_openrouter(system, user, max_output_tokens=8)
+                result["openrouter"]["ok"] = True
+            except Exception as exc:
+                result["openrouter"]["error"] = self._public_ai_error(exc)
+
+        return result
 
     async def _run_chunks(
         self,
@@ -1072,7 +1415,7 @@ class AIService:
             try:
                 results.append(await self._complete(system, user, max_output_tokens=max_output_tokens))
             except Exception as exc:
-                logger.error("Чанк %s/%s не оброблено: %s", i, len(chunks), exc)
+                logger.error("Чанк %s/%s не оброблено: %s", i, len(chunks), mask_sensitive_text(exc))
                 results.append(f"⚠️ Частина {i} ({label}) не оброблена: {self._public_ai_error(exc)}")
                 if isinstance(exc, GeminiRateLimitError):
                     break
@@ -1173,6 +1516,12 @@ class AIService:
         if not messages:
             return "В базі немає повідомлень для відповіді на це питання."
 
+        is_overview = is_market_overview_question(question)
+        if is_overview:
+            messages = filter_general_report_messages(messages)
+            if not messages:
+                return "По суті по заливах конкретики немає."
+
         chunks = chunk_messages(messages, self.max_input_chars)
         logger.info("ask: %s повідомлень -> %s чанків", len(messages), len(chunks))
 
@@ -1184,12 +1533,16 @@ class AIService:
             user += f"Повідомлення з бази:\n{body}"
             return user
 
-        partials = await self._run_chunks(chunks, build_prompt, ASK_SYSTEM)
+        max_output_tokens = 1000 if is_overview else 32768
+        partials = await self._run_chunks(chunks, build_prompt, ASK_SYSTEM, max_output_tokens=max_output_tokens)
         if not _has_successful_partials(partials):
             return "⚠️ AI зараз не зміг обробити базу через ключі/ліміти. Я зменшив Groq-запит; спробуй поставити питання ще раз."
 
         if len(partials) == 1:
-            return partials[0]
+            answer = partials[0]
+            if is_overview:
+                answer = fill_missing_report_sources(clean_report_links(answer), messages)
+            return polish_ukrainian_answer(answer)
 
         labeled = [
             f"=== ЧАСТИНА {i} ({_describe_chunk(chunk)}) ===\n{partial}"
@@ -1203,7 +1556,10 @@ class AIService:
             + "\n\n".join(labeled)
         )
 
-        return await self._complete(ASK_MERGE_SYSTEM, merge_user)
+        answer = await self._complete(ASK_MERGE_SYSTEM, merge_user, max_output_tokens=(1200 if is_overview else 32768))
+        if is_overview:
+            answer = fill_missing_report_sources(clean_report_links(answer), messages)
+        return polish_ukrainian_answer(answer)
 
     async def search_summary(self, query: str, messages: list[dict]) -> str:
         if not messages:

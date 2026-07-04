@@ -290,6 +290,64 @@ class TelegramCollector:
         logger.info("✅ Backfill завершено: %s нових повідомлень, %s діалогів оброблено", added, dialogs_done)
         return added
 
+    async def sync_monitored_recent(
+        self,
+        hours: int = 24,
+        per_chat_limit: int = 50,
+        max_chats: int = 80,
+    ) -> int:
+        """
+        Fast refresh for "what happened today" questions.
+        Reads only chats explicitly stored in monitored_chats, not every dialog
+        in the account. This keeps answers fresh without doing global Telegram
+        search or touching subscriptions.
+        """
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        added = 0
+        chats_done = 0
+        chats = await self.db.get_monitored_chats(active_only=True)
+
+        for chat in chats[:max_chats]:
+            ref = chat.get("username") or chat.get("link") or chat.get("chat_id")
+            if not ref:
+                continue
+            if isinstance(ref, str) and chat.get("username") and not ref.startswith("@"):
+                ref = f"@{ref}"
+
+            try:
+                entity = await self.client.get_entity(ref)
+                if not await self._should_collect_entity(entity):
+                    continue
+
+                async for message in self.client.iter_messages(
+                    entity,
+                    limit=min(per_chat_limit, self.max_messages_on_start),
+                ):
+                    if not message.date:
+                        continue
+                    msg_date = message.date if message.date.tzinfo else message.date.replace(tzinfo=timezone.utc)
+                    msg_date = msg_date.astimezone(timezone.utc)
+                    if msg_date < since:
+                        break
+                    converted = await self._convert_message(message)
+                    if converted and await self.db.add_message(converted):
+                        added += 1
+                chats_done += 1
+            except FloodWaitError as exc:
+                logger.warning("⏱️ sync_monitored_recent FloodWait у '%s': %s сек", chat.get("title"), exc.seconds)
+                if exc.seconds <= 20:
+                    await asyncio.sleep(exc.seconds)
+                    continue
+                break
+            except Exception as exc:
+                logger.warning("sync_monitored_recent: не вдалось оновити '%s': %s", chat.get("title"), exc)
+
+            if chats_done % 10 == 0:
+                await asyncio.sleep(0.5)
+
+        logger.info("🔄 sync_monitored_recent: %s нових повідомлень, %s чатів перевірено", added, chats_done)
+        return added
+
     async def add_monitored_chat_from_ref(self, ref: str) -> dict:
         ref = ref.strip()
         if not ref:
